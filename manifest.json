@@ -1,0 +1,7 @@
+{
+  "name": "Auto Welcome Reply",
+  "description": "Replies to server join messages with a text message. Choose which servers and what text in the plugin settings.",
+  "authors": [{ "name": "You" }],
+  "main": "index.js",
+  "hash": "d2a81fdb692758a56e5f93621a33d13d11674141b1b0a7c8039b3c26c5eec775"
+}
