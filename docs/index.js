@@ -2,11 +2,9 @@
   "use strict";
   var module = { exports: {} };
 
-  var CONFIG = {
-    // Delay before sending, in ms (random between min and max)
-    minDelay: 10,
-    maxDelay: 100
-  };
+  // Delay before sending, in ms (random between min and max). Editable in settings.
+  var DEFAULT_MIN_DELAY = 10;
+  var DEFAULT_MAX_DELAY = 100;
 
   var DEFAULT_MESSAGE = "Are you an alt?";
 
@@ -43,13 +41,31 @@
   // ---------- Settings storage ----------
   // storage.message    : string, the text sent in reply to a join message
   // storage.allGuilds  : boolean, greet in every server
-  // storage.guilds     : { [guildId]: true } servers chosen when allGuilds is off
+  // storage.guildIds   : string, server IDs separated by commas/spaces (used when allGuilds is off)
   function ensureDefaults() {
     if (typeof storage.message !== "string") storage.message = DEFAULT_MESSAGE;
+    if (typeof storage.debug !== "boolean") storage.debug = true;
+    if (typeof storage.minDelay !== "string") storage.minDelay = String(DEFAULT_MIN_DELAY);
+    if (typeof storage.maxDelay !== "string") storage.maxDelay = String(DEFAULT_MAX_DELAY);
     if (typeof storage.allGuilds !== "boolean") storage.allGuilds = false;
-    if (!storage.guilds || typeof storage.guilds !== "object") storage.guilds = {};
+    if (typeof storage.guildIds !== "string") {
+      // migrate any servers picked in the old list
+      var old = storage.guilds && typeof storage.guilds === "object"
+        ? Object.keys(storage.guilds).filter(function (k) { return storage.guilds[k]; })
+        : [];
+      storage.guildIds = old.join(", ");
+    }
   }
   ensureDefaults();
+
+  function getDelays() {
+    var min = parseInt(storage.minDelay, 10);
+    var max = parseInt(storage.maxDelay, 10);
+    if (!isFinite(min) || min < 0) min = DEFAULT_MIN_DELAY;
+    if (!isFinite(max) || max < 0) max = DEFAULT_MAX_DELAY;
+    if (max < min) { var t = min; min = max; max = t; }
+    return { min: min, max: max };
+  }
 
   function getMessage() {
     return String(storage.message || "").trim();
@@ -57,18 +73,13 @@
 
   function guildAllowed(guildId) {
     if (storage.allGuilds) return true;
-    return !!(guildId && storage.guilds && storage.guilds[guildId]);
+    return !!(guildId && getGuildIds().indexOf(String(guildId)) !== -1);
   }
 
-  function getGuildList() {
-    try {
-      var all = GuildStore && GuildStore.getGuilds ? GuildStore.getGuilds() : {};
-      return Object.keys(all)
-        .map(function (id) { return { id: id, name: all[id].name || id }; })
-        .sort(function (a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); });
-    } catch (e) {
-      return [];
-    }
+  function getGuildIds() {
+    return String(storage.guildIds || "")
+      .split(/[,\s]+/)
+      .filter(function (x) { return /^\d{15,25}$/.test(x); });
   }
 
   // ---------- Helpers ----------
@@ -79,6 +90,10 @@
     } catch (e) {
       logger.log("[Auto Welcome Reply] toast failed: " + String(e));
     }
+  }
+
+  function dbg(text) {
+    if (storage.debug) toast(text);
   }
 
   function getToken() {
@@ -136,7 +151,9 @@
       var token = getToken();
       if (token) req.headers = { Authorization: token };
 
-      return Promise.resolve(HTTP.post(req)).catch(function (e) {
+      return Promise.resolve(HTTP.post(req)).then(function () {
+        dbg("reply sent");
+      }).catch(function (e) {
         var status = e && (e.status != null ? e.status : e.message);
         toast("message failed: " + String(status));
       });
@@ -170,7 +187,11 @@
     var channelId = payload.channelId || message.channel_id;
     var guildId = guildOf(payload, message, channelId);
 
-    if (!guildAllowed(guildId)) return;
+    dbg("join message seen");
+    if (!guildAllowed(guildId)) {
+      dbg("skipped: this server is not enabled in settings");
+      return;
+    }
     if (!channelId || !message.id) return;
     if (greeted.has(message.id)) return;
     greeted.add(message.id);
@@ -178,7 +199,8 @@
     var userId = message.author && message.author.id;
     if (!userId || userId === currentUserId()) return;
 
-    var delay = CONFIG.minDelay + Math.random() * Math.max(0, CONFIG.maxDelay - CONFIG.minDelay);
+    var d = getDelays();
+    var delay = d.min + Math.random() * (d.max - d.min);
     var messageId = message.id;
     setTimeout(function () {
       try {
@@ -194,17 +216,8 @@
     useProxy(storage);
     ensureDefaults();
 
-    var queryState = React.useState("");
-    var query = queryState[0];
-    var setQuery = queryState[1];
-
     var h = React.createElement;
-    var guilds = getGuildList();
-    var q = query.trim().toLowerCase();
-    var shown = q
-      ? guilds.filter(function (g) { return g.name.toLowerCase().indexOf(q) !== -1; })
-      : guilds;
-    var selectedCount = Object.keys(storage.guilds).filter(function (id) { return storage.guilds[id]; }).length;
+    var idCount = getGuildIds().length;
 
     var children = [];
 
@@ -228,6 +241,46 @@
       )
     );
 
+    var delays = getDelays();
+    children.push(
+      h(
+        Forms.FormSection,
+        { key: "delay", title: "DELAY (ms)" },
+        h(Forms.FormInput, {
+          title: "Minimum delay",
+          placeholder: String(DEFAULT_MIN_DELAY),
+          value: storage.minDelay,
+          onChange: function (v) { storage.minDelay = v; },
+          keyboardType: "numeric"
+        }),
+        h(Forms.FormInput, {
+          title: "Maximum delay",
+          placeholder: String(DEFAULT_MAX_DELAY),
+          value: storage.maxDelay,
+          onChange: function (v) { storage.maxDelay = v; },
+          keyboardType: "numeric"
+        }),
+        h(Forms.FormText, {
+          style: { paddingHorizontal: 16, paddingVertical: 8 }
+        }, "Waits a random time between " + delays.min + " and " + delays.max + " ms before replying.")
+      )
+    );
+
+    children.push(
+      h(
+        Forms.FormSection,
+        { key: "debug", title: "DEBUG" },
+        h(Forms.FormRow, {
+          label: "Debug toasts",
+          subLabel: "Shows what the plugin is doing. Turn off when it works.",
+          trailing: h(Forms.FormSwitch, {
+            value: !!storage.debug,
+            onValueChange: function (v) { storage.debug = v; }
+          })
+        })
+      )
+    );
+
     // Server chooser
     var serverRows = [];
     serverRows.push(
@@ -245,44 +298,22 @@
     if (!storage.allGuilds) {
       serverRows.push(
         h(Forms.FormInput, {
-          key: "search",
-          title: "Search servers",
-          placeholder: "Type a server name",
-          value: query,
-          onChange: function (v) { setQuery(v); }
+          key: "ids",
+          title: "Server IDs",
+          placeholder: "123456789012345678, 987654321098765432",
+          value: storage.guildIds,
+          onChange: function (v) { storage.guildIds = v; },
+          keyboardType: "default"
         })
       );
       serverRows.push(
         h(Forms.FormText, {
           key: "count",
           style: { paddingHorizontal: 16, paddingVertical: 8 }
-        }, selectedCount + " selected")
+        }, idCount
+          ? idCount + " valid server ID" + (idCount === 1 ? "" : "s")
+          : "No valid server ID. Paste a numeric ID, separate several with commas.")
       );
-      if (!shown.length) {
-        serverRows.push(
-          h(Forms.FormText, {
-            key: "none",
-            style: { paddingHorizontal: 16, paddingVertical: 8 }
-          }, guilds.length ? "No servers match." : "No servers found.")
-        );
-      }
-      shown.forEach(function (g) {
-        serverRows.push(
-          h(Forms.FormRow, {
-            key: g.id,
-            label: g.name,
-            trailing: h(Forms.FormSwitch, {
-              value: !!storage.guilds[g.id],
-              onValueChange: function (v) {
-                var next = {};
-                Object.keys(storage.guilds).forEach(function (k) { next[k] = storage.guilds[k]; });
-                if (v) next[g.id] = true; else delete next[g.id];
-                storage.guilds = next;
-              }
-            })
-          })
-        );
-      });
     }
 
     children.push(
@@ -296,6 +327,7 @@
   module.exports = {
     onLoad: function () {
       ensureDefaults();
+      dbg("loaded (debug build)");
 
       // Preferred: hook the dispatcher the same way AutoReact does
       if (FD && Array.isArray(FD._interceptors)) {
